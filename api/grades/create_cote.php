@@ -17,11 +17,13 @@ $id_cours = $input['id_cours'] ?? '';
 $id_affectation = $input['id_affectation'] ?? '';
 $cote_obtenue = $input['cote_obtenue'] ?? null; // C'est la note sur 100
 $periode_evaluation = $input['periode_evaluation'] ?? ''; // Ex: '1er Trimestre', 'Examen Final'
+// 💡 NOUVEAU: Matricule du professeur qui tente de saisir la note (simule l'utilisateur connecté)
+$matricule_professeur = $input['matricule_professeur'] ?? ''; 
 
 // Validation des données
-if (empty($matricule_eleve) || empty($id_cours) || empty($id_affectation) || empty($periode_evaluation) || !is_numeric($cote_obtenue) || $cote_obtenue < 0 || $cote_obtenue > 100) {
+if (empty($matricule_eleve) || empty($id_cours) || empty($id_affectation) || empty($periode_evaluation) || !is_numeric($cote_obtenue) || $cote_obtenue < 0 || $cote_obtenue > 100 || empty($matricule_professeur)) {
     http_response_code(400);
-    echo json_encode(['success' => false, 'message' => 'Matricule élève, ID Cours, ID Affectation, Période et Note (entre 0 et 100) sont requis.']);
+    echo json_encode(['success' => false, 'message' => 'Matricule élève, ID Cours, ID Affectation, Période, Note et Matricule Professeur sont requis.']);
     exit;
 }
 
@@ -29,6 +31,27 @@ try {
     $pdo = getDbConnection();
     $pdo->beginTransaction();
 
+    // 🔒 ÉTAPE DE SÉCURITÉ : VÉRIFIER SI CE PROFESSEUR EST AFFECTÉ À CE COURS/AFFECTATION
+    $stmtCheck = $pdo->prepare("
+        SELECT COUNT(*) 
+        FROM AFFECTATION_COURS 
+        WHERE id_affectation = :id_affectation 
+        AND matricule_pers = :matricule_prof
+    ");
+    
+    $stmtCheck->execute([
+        ':id_affectation' => $id_affectation,
+        ':matricule_prof' => $matricule_professeur
+    ]);
+
+    if ($stmtCheck->fetchColumn() == 0) {
+        http_response_code(403);
+        $pdo->rollBack();
+        echo json_encode(['success' => false, 'message' => 'Accès refusé. Le personnel spécifié n\'est pas affecté à cette tâche.']);
+        exit;
+    }
+    
+    // La suite de l'insertion reste inchangée...
     $date_enregistrement = date('Y-m-d H:i:s');
     
     // 1. Insertion de la note
@@ -60,7 +83,8 @@ try {
 
 } catch (PDOException $e) {
     $pdo->rollBack();
-    // Gestion de la contrainte UNIQUE (Un élève ne peut pas avoir deux notes pour le même cours/période)
+    // Gestion de la contrainte UNIQUE...
+    // [Reste du code de gestion des erreurs... ]
     if ($e->getCode() == '23000' || strpos($e->getMessage(), 'UNIQUE constraint failed') !== false) {
         http_response_code(409);
         echo json_encode(['success' => false, 'message' => "Cet élève a déjà une note pour le Cours ID $id_cours durant la période $periode_evaluation. Utilisez la modification."]);
