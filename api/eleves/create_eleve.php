@@ -1,84 +1,102 @@
 <?php
-// /api/eleves/create_eleve.php
-// API pour ajouter un nouvel élève
+// api/eleves/create_eleve.php
 
-require_once(dirname(__DIR__, 2) . '/config.php'); 
-header('Content-Type: application/json');
+header("Access-Control-Allow-Origin: *"); 
+header("Access-Control-Allow-Methods: POST, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type, Authorization");
+header("Content-Type: application/json");
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    http_response_code(405);
-    echo json_encode(['success' => false, 'message' => 'Méthode non autorisée. Seul POST est accepté.']);
-    exit;
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
 }
 
-$input = json_decode(file_get_contents('php://input'), true);
-$nom = $input['nom'] ?? '';
-$postnom = $input['postnom'] ?? '';
-$prenom = $input['prenom'] ?? '';
-$date_naissance = $input['date_naissance'] ?? ''; // Format YYYY-MM-DD
-$id_classe = $input['id_classe'] ?? '';
+require_once('../../config.php'); 
 
-// Validation des données
-if (empty($nom) || empty($postnom) || empty($prenom) || empty($date_naissance) || empty($id_classe)) {
-    http_response_code(400);
-    echo json_encode(['success' => false, 'message' => 'Nom, Postnom, Prénom, Date de naissance et ID de la classe sont requis.']);
-    exit;
-}
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $data = json_decode(file_get_contents('php://input'), true);
 
-try {
-    $pdo = getDbConnection();
-    $pdo->beginTransaction();
+    $matricule_eleve = $data['matricule_eleve'] ?? '';
+    $nom = $data['nom'] ?? '';
+    $postnom = $data['postnom'] ?? '';
+    $prenom = $data['prenom'] ?? '';
+    $date_naissance = $data['date_naissance'] ?? ''; // Format AAAA-MM-JJ
+    $nom_classe = $data['nom_classe'] ?? '';
+    $option_classe = $data['option_classe'] ?? '';
+    $promotion_annee = $data['promotion_annee'] ?? date('Y'); // Année en cours par défaut
 
-    // 1. Vérification de l'existence de la classe (FK check)
-    $stmtClasse = $pdo->prepare("SELECT id_classe FROM CLASSE WHERE id_classe = :id_classe");
-    $stmtClasse->execute([':id_classe' => $id_classe]);
-    if (!$stmtClasse->fetchColumn()) {
-        http_response_code(404);
-        echo json_encode(['success' => false, 'message' => "Classe ID $id_classe non trouvée. Impossible d'affecter l'élève."]);
-        exit;
+    // Validation des champs requis
+    if (empty($matricule_eleve) || empty($nom) || empty($prenom) || empty($date_naissance) || empty($nom_classe) || empty($option_classe)) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'Veuillez remplir tous les champs obligatoires pour l\'inscription.']);
+        exit();
     }
+    
+    try {
+        $pdo = getDbConnection();
+        $pdo->beginTransaction();
 
-    // 2. Génération du matricule de l'élève (E001, E002...)
-    $stmtCount = $pdo->query("SELECT COUNT(*) FROM ELEVE");
-    $nextId = $stmtCount->fetchColumn() + 1;
-    $matricule_eleve = 'E' . str_pad($nextId, 3, '0', STR_PAD_LEFT);
+        // 1. Trouver l'ID de la CLASSE (ou la créer si elle n'existe pas)
+        $stmtClasse = $pdo->prepare("SELECT id_classe FROM CLASSE WHERE nom_classe = :nom_classe AND option_classe = :option_classe AND promotion_annee = :promotion_annee");
+        $stmtClasse->execute([':nom_classe' => $nom_classe, ':option_classe' => $option_classe, ':promotion_annee' => $promotion_annee]);
+        $id_classe = $stmtClasse->fetchColumn();
 
-    $date_inscription = date('Y-m-d H:i:s');
-    
-    // 3. Insertion
-    $stmt = $pdo->prepare("
-        INSERT INTO ELEVE 
-        (matricule_eleve, id_classe, nom, postnom, prenom, date_naissance, date_inscription, statut_actif)
-        VALUES 
-        (:mat, :classe, :nom, :postnom, :prenom, :dob, :doi, 1)
-    ");
-    
-    $stmt->execute([
-        ':mat' => $matricule_eleve,
-        ':classe' => $id_classe,
-        ':nom' => $nom,
-        ':postnom' => $postnom,
-        ':prenom' => $prenom,
-        ':dob' => $date_naissance,
-        ':doi' => $date_inscription
-    ]);
-    
-    $pdo->commit();
-    
-    // Succès
+        if (!$id_classe) {
+            // Créer la classe si elle n'existe pas (utile pour les nouvelles années scolaires)
+            $pdo->exec("INSERT INTO CLASSE (nom_classe, option_classe, promotion_annee) VALUES ('$nom_classe', '$option_classe', '$promotion_annee')");
+            $id_classe = $pdo->lastInsertId();
+        }
+
+        // 2. Insérer l'élève
+        $sql = "
+            INSERT INTO ELEVE 
+            (matricule_eleve, id_classe, nom, postnom, prenom, date_naissance, date_inscription, statut_actif) 
+            VALUES (:matricule_eleve, :id_classe, :nom, :postnom, :prenom, :date_naissance, datetime('now'), 1)
+        ";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([
+            ':matricule_eleve' => $matricule_eleve,
+            ':id_classe' => $id_classe,
+            ':nom' => $nom,
+            ':postnom' => $postnom,
+            ':prenom' => $prenom,
+            ':date_naissance' => $date_naissance
+        ]);
+$pdo->commit();
     http_response_code(201);
-    echo json_encode([
-        'success' => true, 
-        'message' => 'Élève créé avec succès.',
-        'matricule' => $matricule_eleve
-    ]);
+    echo json_encode(['success' => true, 'message' => "L'élève $nom $prenom a été inscrit avec succès."]);
 
 } catch (PDOException $e) {
-    $pdo->rollBack();
+    if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+    }
+    
+    $message = "Erreur de base de données. ";
+    
+    // 🚨 Logique pour détecter et gérer le problème de matricule (cas le plus fréquent)
+    if (strpos($e->getMessage(), 'UNIQUE constraint failed: ELEVE.matricule_eleve') !== false) {
+         $message = "Ce matricule d'élève existe déjà. Veuillez en choisir un autre.";
+    } 
+    // 🚨 Logique pour les autres contraintes (ex: la classe existe déjà)
+    else if (strpos($e->getMessage(), 'UNIQUE constraint failed') !== false) {
+        $message = "Erreur de contrainte : La classe ou l'option spécifiée est déjà enregistrée. Détails: " . $e->getMessage();
+    }
+    else {
+         $message .= "Détail : " . $e->getMessage();
+    }
+    
     http_response_code(500);
-    echo json_encode(['success' => false, 'message' => 'Erreur lors de la création de l\'élève : ' . $e->getMessage()]);
+    echo json_encode(['success' => false, 'message' => $message]);
+    
 } catch (Exception $e) {
-    http_response_code(500);
-    echo json_encode(['success' => false, 'message' => 'Erreur inattendue : ' . $e->getMessage()]);
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    }
+} else {
+    http_response_code(405);
+    echo json_encode(['success' => false, 'message' => 'Méthode non autorisée.']);
 }
 ?>
